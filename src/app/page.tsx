@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import MenuBar from '@/components/MenuBar';
 import LeftSidebar from '@/components/LeftSidebar';
 import TabBar from '@/components/TabBar';
@@ -26,6 +26,45 @@ export default function Home() {
   
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabId, setActiveTabId] = useState('');
+
+  // Git更新のデバウンス用
+  const gitUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // デバウンス付きのGit更新関数
+  const debouncedGitUpdate = useCallback(() => {
+    // 既存のタイマーをクリア
+    if (gitUpdateTimerRef.current) {
+      clearTimeout(gitUpdateTimerRef.current);
+    }
+    
+    // 新しいタイマーを設定（2秒後に実行）
+    gitUpdateTimerRef.current = setTimeout(() => {
+      console.log('[Git Update] Debounced git refresh trigger');
+      setGitRefreshTrigger(prev => prev + 1);
+      gitUpdateTimerRef.current = null;
+    }, 2000);
+  }, []);
+
+  // 即座のGit更新関数（Git操作時用）
+  const immediateGitUpdate = useCallback(() => {
+    // デバウンスタイマーをクリア
+    if (gitUpdateTimerRef.current) {
+      clearTimeout(gitUpdateTimerRef.current);
+      gitUpdateTimerRef.current = null;
+    }
+    
+    console.log('[Git Update] Immediate git refresh trigger');
+    setGitRefreshTrigger(prev => prev + 1);
+  }, []);
+
+  // コンポーネントアンマウント時にタイマーをクリア
+  useEffect(() => {
+    return () => {
+      if (gitUpdateTimerRef.current) {
+        clearTimeout(gitUpdateTimerRef.current);
+      }
+    };
+  }, []);
 
   // プロジェクト管理
   const { 
@@ -256,10 +295,8 @@ export default function Home() {
         ));
         console.log('[handleTabContentUpdate] Tab isDirty status cleared');
         
-        // ファイル保存後にGitパネルを更新（ファイルシステム同期を待つ）
-        setTimeout(() => {
-          setGitRefreshTrigger(prev => prev + 1);
-        }, 200);
+        // ファイル保存後にGitパネルを更新（デバウンス付き）
+        debouncedGitUpdate();
       } catch (error) {
         console.error('[handleTabContentUpdate] Failed to save file:', error);
         // エラーをユーザーに通知（今後の拡張用）
@@ -361,8 +398,8 @@ export default function Home() {
               loadProject(currentProject);
               console.log('Project reload completed');
               
-              // GitPanelの更新も即座にトリガー
-              setGitRefreshTrigger(prev => prev + 1);
+              // GitPanelの更新も即座にトリガー（Git操作なので即座更新）
+              immediateGitUpdate();
               console.log('Git refresh trigger updated');
             } else {
               console.log('No current project or loadProject function');
@@ -401,8 +438,8 @@ export default function Home() {
                 await syncTerminalFileOperation(path, type, content);
               }
               
-              // Git状態も更新
-              setGitRefreshTrigger(prev => prev + 1);
+              // Git状態も更新（デバウンス付き）
+              debouncedGitUpdate();
             }}
           />
         )}
