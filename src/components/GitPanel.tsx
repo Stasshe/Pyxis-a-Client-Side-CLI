@@ -1,9 +1,102 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { GitBranch, GitCommit, RefreshCw, Plus, Check, X, GitMerge, Clock, User, Minus, RotateCcw } from 'lucide-react';
 import { GitRepository, GitCommit as GitCommitType, GitStatus } from '@/types/git';
 import { GitCommands } from '@/utils/cmd/git';
+
+// メモ化されたファイルリスト項目コンポーネント
+const FileListItem = React.memo(({ 
+  file, 
+  type, 
+  onStage, 
+  onUnstage, 
+  onDiscard 
+}: { 
+  file: string;
+  type: 'staged' | 'unstaged' | 'untracked';
+  onStage?: (file: string) => void;
+  onUnstage?: (file: string) => void;
+  onDiscard?: (file: string) => void;
+}) => {
+  const colorClass = type === 'staged' ? 'text-green-600' : 
+                    type === 'unstaged' ? 'text-orange-600' : 'text-blue-600';
+  
+  return (
+    <div className="flex items-center justify-between text-xs py-1">
+      <span className={`${colorClass} flex-1 truncate`}>{file}</span>
+      <div className="flex gap-1">
+        {type === 'staged' && onUnstage && (
+          <button
+            onClick={() => onUnstage(file)}
+            className="p-1 hover:bg-muted rounded"
+            title="アンステージング"
+          >
+            <Minus className="w-3 h-3" />
+          </button>
+        )}
+        {(type === 'unstaged' || type === 'untracked') && onStage && (
+          <button
+            onClick={() => onStage(file)}
+            className="p-1 hover:bg-muted rounded"
+            title="ステージング"
+          >
+            <Plus className="w-3 h-3" />
+          </button>
+        )}
+        {(type === 'unstaged' || type === 'untracked') && onDiscard && (
+          <button
+            onClick={() => onDiscard(file)}
+            className="p-1 hover:bg-muted rounded text-red-500"
+            title={type === 'untracked' ? 'ファイルを削除' : '変更を破棄'}
+          >
+            <RotateCcw className="w-3 h-3" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+});
+FileListItem.displayName = 'FileListItem';
+
+// ファイルリストセクションのメモ化コンポーネント
+const FileListSection = React.memo(({ 
+  title, 
+  files, 
+  type, 
+  onStage, 
+  onUnstage, 
+  onDiscard 
+}: {
+  title: string;
+  files: string[];
+  type: 'staged' | 'unstaged' | 'untracked';
+  onStage?: (file: string) => void;
+  onUnstage?: (file: string) => void;
+  onDiscard?: (file: string) => void;
+}) => {
+  if (files.length === 0) return null;
+  
+  const colorClass = type === 'staged' ? 'text-green-600' : 
+                    type === 'unstaged' ? 'text-orange-600' : 'text-blue-600';
+  
+  return (
+    <div>
+      <p className={`text-xs ${colorClass} mb-1`}>{title} ({files.length})</p>
+      {files.map((file) => (
+        <FileListItem
+          key={`${type}-${file}`}
+          file={file}
+          type={type}
+          onStage={onStage}
+          onUnstage={onUnstage}
+          onDiscard={onDiscard}
+        />
+      ))}
+    </div>
+  );
+});
+FileListSection.displayName = 'FileListSection';
 
 interface GitPanelProps {
   currentProject?: string;
@@ -20,86 +113,13 @@ export default function GitPanel({ currentProject, onRefresh, gitRefreshTrigger,
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Git操作用のコマンドインスタンス
-  const gitCommands = currentProject ? new GitCommands(currentProject, onFileOperation) : null;
+  // Git操作用のコマンドインスタンス（メモ化）
+  const gitCommands = useMemo(() => {
+    return currentProject ? new GitCommands(currentProject, onFileOperation) : null;
+  }, [currentProject, onFileOperation]);
 
-  // Git状態を取得
-  const fetchGitStatus = async () => {
-    if (!gitCommands || !currentProject) return;
-
-    try {
-      setIsLoading(true);
-      setError(null);
-      
-      console.log('[GitPanel] Fetching git status...');
-      
-      // ファイルシステムの同期を確実にする
-      const fs = (gitCommands as any).fs;
-      if (fs && (fs as any).sync) {
-        try {
-          await (fs as any).sync();
-          console.log('[GitPanel] FileSystem synced before status check');
-        } catch (syncError) {
-          console.warn('[GitPanel] FileSystem sync failed:', syncError);
-        }
-      }
-      
-      // ファイルシステムの変更が確実に反映されるまで待機
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      // Git状態を並行して取得
-      const [statusResult, logResult, branchResult] = await Promise.all([
-        gitCommands.status(),
-        gitCommands.getFormattedLog(20),
-        gitCommands.branch()
-      ]);
-
-      console.log('[GitPanel] Git status result:', statusResult);
-
-      // コミット履歴をパース
-      const commits = parseGitLog(logResult);
-      
-      // ブランチ情報をパース
-      const branches = parseGitBranches(branchResult);
-      
-      // ステータス情報をパース
-      const status = parseGitStatus(statusResult);
-      
-      console.log('[GitPanel] Parsed status:', {
-        staged: status.staged,
-        unstaged: status.unstaged,
-        untracked: status.untracked
-      });
-
-      setGitRepo({
-        initialized: true,
-        branches,
-        commits,
-        status,
-        currentBranch: status.branch
-      });
-
-      // 変更ファイル数を計算してコールバックで通知
-      if (onGitStatusChange) {
-        const changesCount = status.staged.length + status.unstaged.length + status.untracked.length;
-        console.log('[GitPanel] Notifying changes count:', changesCount);
-        onGitStatusChange(changesCount);
-      }
-    } catch (error) {
-      console.error('Failed to fetch git status:', error);
-      setError(error instanceof Error ? error.message : 'Git操作でエラーが発生しました');
-      setGitRepo(null);
-      // エラー時は変更ファイル数を0にリセット
-      if (onGitStatusChange) {
-        onGitStatusChange(0);
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Git logをパースしてコミット配列に変換
-  const parseGitLog = (logOutput: string): GitCommitType[] => {
+  // Git logをパースしてコミット配列に変換（メモ化）
+  const parseGitLog = useCallback((logOutput: string): GitCommitType[] => {
     if (!logOutput.trim()) {
       return [];
     }
@@ -143,10 +163,10 @@ export default function GitPanel({ currentProject, onRefresh, gitRefreshTrigger,
     }
     
     return commits.sort((a, b) => b.timestamp - a.timestamp);
-  };
+  }, []);
 
-  // Git branchをパース
-  const parseGitBranches = (branchOutput: string) => {
+  // Git branchをパース（メモ化）
+  const parseGitBranches = useCallback((branchOutput: string) => {
     return branchOutput.split('\n')
       .filter(line => line.trim())
       .map(line => ({
@@ -155,10 +175,10 @@ export default function GitPanel({ currentProject, onRefresh, gitRefreshTrigger,
         isRemote: line.includes('remotes/'),
         lastCommit: undefined
       }));
-  };
+  }, []);
 
-  // Git statusをパース
-  const parseGitStatus = (statusOutput: string): GitStatus => {
+  // Git statusをパース（メモ化）
+  const parseGitStatus = useCallback((statusOutput: string): GitStatus => {
     console.log('[GitPanel] Parsing git status output:', statusOutput);
     const lines = statusOutput.split('\n');
     const status: GitStatus = {
@@ -227,28 +247,103 @@ export default function GitPanel({ currentProject, onRefresh, gitRefreshTrigger,
     });
 
     return status;
-  };
+  }, []);
 
-  // ファイルをステージング
-  const handleStageFile = async (file: string) => {
+  // Git状態を取得（メモ化）
+  const fetchGitStatus = useCallback(async () => {
+    if (!gitCommands || !currentProject) return;
+
+    try {
+      setIsLoading(true);
+      setError(null);
+      
+      console.log('[GitPanel] Fetching git status...');
+      
+      // ファイルシステムの同期を確実にする
+      const fs = (gitCommands as any).fs;
+      if (fs && (fs as any).sync) {
+        try {
+          await (fs as any).sync();
+          console.log('[GitPanel] FileSystem synced before status check');
+        } catch (syncError) {
+          console.warn('[GitPanel] FileSystem sync failed:', syncError);
+        }
+      }
+      
+      // ファイルシステムの変更反映待機時間を短縮（ちらつき軽減）
+      await new Promise(resolve => setTimeout(resolve, 200));
+      
+      // Git状態を並行して取得
+      const [statusResult, logResult, branchResult] = await Promise.all([
+        gitCommands.status(),
+        gitCommands.getFormattedLog(20),
+        gitCommands.branch()
+      ]);
+
+      console.log('[GitPanel] Git status result:', statusResult);
+
+      // コミット履歴をパース
+      const commits = parseGitLog(logResult);
+      
+      // ブランチ情報をパース
+      const branches = parseGitBranches(branchResult);
+      
+      // ステータス情報をパース
+      const status = parseGitStatus(statusResult);
+      
+      console.log('[GitPanel] Parsed status:', {
+        staged: status.staged,
+        unstaged: status.unstaged,
+        untracked: status.untracked
+      });
+
+      setGitRepo({
+        initialized: true,
+        branches,
+        commits,
+        status,
+        currentBranch: status.branch
+      });
+
+      // 変更ファイル数を計算してコールバックで通知
+      if (onGitStatusChange) {
+        const changesCount = status.staged.length + status.unstaged.length + status.untracked.length;
+        console.log('[GitPanel] Notifying changes count:', changesCount);
+        onGitStatusChange(changesCount);
+      }
+    } catch (error) {
+      console.error('Failed to fetch git status:', error);
+      setError(error instanceof Error ? error.message : 'Git操作でエラーが発生しました');
+      setGitRepo(null);
+      // エラー時は変更ファイル数を0にリセット
+      if (onGitStatusChange) {
+        onGitStatusChange(0);
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  }, [gitCommands, currentProject, onGitStatusChange, parseGitLog, parseGitBranches, parseGitStatus]);
+
+  // ファイルをステージング（メモ化）
+  const handleStageFile = useCallback(async (file: string) => {
     if (!gitCommands) return;
     
     try {
       console.log('[GitPanel] Staging file:', file);
       await gitCommands.add(file);
       
-      // ステージング後十分な時間待ってから状態を更新
+      // ステージング後短時間で状態を更新（ちらつき軽減）
       setTimeout(() => {
         console.log('[GitPanel] Refreshing status after staging');
         fetchGitStatus();
-      }, 500);
+      }, 200);
     } catch (error) {
       console.error('Failed to stage file:', error);
     }
-  };
+  }, [gitCommands, fetchGitStatus]);
 
-  // ファイルをアンステージング
-  const handleUnstageFile = async (file: string) => {
+  // ファイルをアンステージング（メモ化）
+  const handleUnstageFile = useCallback(async (file: string) => {
     if (!gitCommands) return;
     
     try {
@@ -257,28 +352,28 @@ export default function GitPanel({ currentProject, onRefresh, gitRefreshTrigger,
     } catch (error) {
       console.error('Failed to unstage file:', error);
     }
-  };
+  }, [gitCommands, fetchGitStatus]);
 
-  // 全ファイルをステージング
-  const handleStageAll = async () => {
+  // 全ファイルをステージング（メモ化）
+  const handleStageAll = useCallback(async () => {
     if (!gitCommands) return;
     
     try {
       console.log('[GitPanel] Staging all files');
       await gitCommands.add('.');
       
-      // ステージング後十分な時間待ってから状態を更新
+      // ステージング後短時間で状態を更新（ちらつき軽減）
       setTimeout(() => {
         console.log('[GitPanel] Refreshing status after staging all');
         fetchGitStatus();
-      }, 600);
+      }, 300);
     } catch (error) {
       console.error('Failed to stage all files:', error);
     }
-  };
+  }, [gitCommands, fetchGitStatus]);
 
-  // 全ファイルをアンステージング
-  const handleUnstageAll = async () => {
+  // 全ファイルをアンステージング（メモ化）
+  const handleUnstageAll = useCallback(async () => {
     if (!gitCommands) return;
     
     try {
@@ -287,10 +382,10 @@ export default function GitPanel({ currentProject, onRefresh, gitRefreshTrigger,
     } catch (error) {
       console.error('Failed to unstage all files:', error);
     }
-  };
+  }, [gitCommands, fetchGitStatus]);
 
-  // ファイルの変更を破棄
-  const handleDiscardChanges = async (file: string) => {
+  // ファイルの変更を破棄（メモ化）
+  const handleDiscardChanges = useCallback(async (file: string) => {
     if (!gitCommands) return;
     
     try {
@@ -309,10 +404,10 @@ export default function GitPanel({ currentProject, onRefresh, gitRefreshTrigger,
     } catch (error) {
       console.error('Failed to discard changes:', error);
     }
-  };
+  }, [gitCommands, fetchGitStatus, onRefresh]);
 
-  // コミット実行
-  const handleCommit = async () => {
+  // コミット実行（メモ化）
+  const handleCommit = useCallback(async () => {
     if (!gitCommands || !commitMessage.trim()) return;
     
     try {
@@ -326,27 +421,35 @@ export default function GitPanel({ currentProject, onRefresh, gitRefreshTrigger,
     } finally {
       setIsCommitting(false);
     }
-  };
+  }, [gitCommands, commitMessage, fetchGitStatus, onRefresh]);
 
   // 初期化とプロジェクト変更時の更新
   useEffect(() => {
     if (currentProject) {
       fetchGitStatus();
     }
-  }, [currentProject]);
+  }, [currentProject, fetchGitStatus]);
 
   // Git更新トリガーが変更されたときの更新
   useEffect(() => {
     if (currentProject && gitRefreshTrigger !== undefined && gitRefreshTrigger > 0) {
       console.log('[GitPanel] Git refresh trigger fired:', gitRefreshTrigger);
-      // ファイル同期完了を待つために適度な遅延
+      // ファイル同期完了を待つ時間を短縮（ちらつき軽減）
       const timer = setTimeout(() => {
         console.log('[GitPanel] Executing delayed git status fetch');
         fetchGitStatus();
-      }, 500);
+      }, 300);
       return () => clearTimeout(timer);
     }
-  }, [gitRefreshTrigger]);
+  }, [gitRefreshTrigger, currentProject, fetchGitStatus]);
+
+  // 変更があるかどうかの計算（メモ化）
+  const hasChanges = useMemo(() => {
+    if (!gitRepo) return false;
+    return gitRepo.status.staged.length > 0 || 
+           gitRepo.status.unstaged.length > 0 || 
+           gitRepo.status.untracked.length > 0;
+  }, [gitRepo]);
 
   if (!currentProject) {
     return (
@@ -390,10 +493,6 @@ export default function GitPanel({ currentProject, onRefresh, gitRefreshTrigger,
       </div>
     );
   }
-
-  const hasChanges = gitRepo.status.staged.length > 0 || 
-                   gitRepo.status.unstaged.length > 0 || 
-                   gitRepo.status.untracked.length > 0;
 
   return (
     <div className="h-full flex flex-col bg-card">
@@ -450,80 +549,26 @@ export default function GitPanel({ currentProject, onRefresh, gitRefreshTrigger,
             <p className="text-xs text-muted-foreground">変更はありません</p>
           ) : (
             <div className="space-y-1">
-              {/* ステージされたファイル */}
-              {gitRepo.status.staged.length > 0 && (
-                <div>
-                  <p className="text-xs text-green-600 mb-1">ステージ済み ({gitRepo.status.staged.length})</p>
-                  {gitRepo.status.staged.map((file) => (
-                    <div key={`staged-${file}`} className="flex items-center justify-between text-xs py-1">
-                      <span className="text-green-600 flex-1 truncate">{file}</span>
-                      <button
-                        onClick={() => handleUnstageFile(file)}
-                        className="p-1 hover:bg-muted rounded ml-1"
-                        title="アンステージング"
-                      >
-                        <Minus className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* 変更されたファイル */}
-              {gitRepo.status.unstaged.length > 0 && (
-                <div>
-                  <p className="text-xs text-orange-600 mb-1">変更済み ({gitRepo.status.unstaged.length})</p>
-                  {gitRepo.status.unstaged.map((file) => (
-                    <div key={`unstaged-${file}`} className="flex items-center justify-between text-xs py-1">
-                      <span className="text-orange-600 flex-1 truncate">{file}</span>
-                      <div className="flex gap-1">
-                        <button
-                          onClick={() => handleStageFile(file)}
-                          className="p-1 hover:bg-muted rounded"
-                          title="ステージング"
-                        >
-                          <Plus className="w-3 h-3" />
-                        </button>
-                        <button
-                          onClick={() => handleDiscardChanges(file)}
-                          className="p-1 hover:bg-muted rounded text-red-500"
-                          title="変更を破棄"
-                        >
-                          <RotateCcw className="w-3 h-3" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* 未追跡ファイル */}
-              {gitRepo.status.untracked.length > 0 && (
-                <div>
-                  <p className="text-xs text-blue-600 mb-1">未追跡 ({gitRepo.status.untracked.length})</p>
-                  {gitRepo.status.untracked.map((file) => (
-                    <div key={`untracked-${file}`} className="flex items-center justify-between text-xs py-1">
-                      <span className="text-blue-600 flex-1 truncate">{file}</span>
-                      <div className="flex gap-1">
-                        <button
-                          onClick={() => handleStageFile(file)}
-                          className="p-1 hover:bg-muted rounded"
-                          title="ステージング"
-                        >
-                          <Plus className="w-3 h-3" />
-                        </button>
-                        <button
-                          onClick={() => handleDiscardChanges(file)}
-                          className="p-1 hover:bg-muted rounded text-red-500"
-                          title="ファイルを削除"
-                        >
-                          <RotateCcw className="w-3 h-3" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
+              <FileListSection
+                title="ステージ済み"
+                files={gitRepo.status.staged}
+                type="staged"
+                onUnstage={handleUnstageFile}
+              />
+              <FileListSection
+                title="変更済み"
+                files={gitRepo.status.unstaged}
+                type="unstaged"
+                onStage={handleStageFile}
+                onDiscard={handleDiscardChanges}
+              />
+              <FileListSection
+                title="未追跡"
+                files={gitRepo.status.untracked}
+                type="untracked"
+                onStage={handleStageFile}
+                onDiscard={handleDiscardChanges}
+              />
             </div>
           )}
         </div>
